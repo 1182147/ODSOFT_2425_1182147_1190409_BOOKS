@@ -1,16 +1,16 @@
 pipeline {
     agent any
 
+    tools {
+        maven 'MVN'
+    }
+
     environment {
+        GIT_REPO_URL = 'https://github.com/1182147/ODSOFT_2425_1182147_1190409_BOOKS.git'
+        GIT_BRANCH = 'main'
 
-        //MAVEN_HOME = '/opt/homebrew' // (MacOS)
-        MAVEN_HOME = '/usr/share/maven' // (Ubuntu)
-
-        GIT_REPO_URL = 'https://nunopsilva@bitbucket.org/nunopsilva/lms-books.git'  // Your Git repository URL
-        GIT_BRANCH = 'master'  // Specify the branch to check out
-        CREDENTIALS_ID = 'user_app_password_para_bitbucket'  // Credentials ID for authentication
-
-        SERVER_PORT = '2226'
+        TEST_SERVER_PORT = 'to-be-filled'
+        PROD_SERVER_PORT = '2228'
 
         IMAGE_NAME = 'lmsbooks'
         IMAGE_TAG = 'latest'
@@ -18,105 +18,82 @@ pipeline {
 
     stages {
 
-        stage('Debug Environment') {
-            steps {
-                sh 'env'
-            }
-        }
-
-
-        stage('Check Docker') {
-            steps {
-                sh 'docker --version'
-            }
-        }
-
         stage('Checkout') {
             steps {
-                // Step to clone the Git repository
-                git branch: "${GIT_BRANCH}",
-                    url: "${GIT_REPO_URL}",
-                    credentialsId: "${CREDENTIALS_ID}"
+                git branch: "${GIT_BRANCH}", url: "${GIT_REPO_URL}"
             }
         }
 
-        stage('Clean') {
+        //   stage('Clean Install') {
+        //       steps {
+        //           script {
+        //                sh "mvn clean install -DskipTests"
+        //           }
+        //       }
+        //   }
+
+        stage('Docker Build') {
+
             steps {
                 script {
-                    sh """
-                        ${MAVEN_HOME}/bin/mvn clean install
-                    """
-                }
-            }
-        }
-/*
-        stage('Validate') {
-            steps {
-                script {
-                    sh "'${MAVEN_HOME}/bin/mvn' validate"
+                    sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} ."
                 }
             }
         }
 
-        stage('Compile') {
+        // For rollback purposes it is always valuable to keep the artifact of
+        // the built binary.
+        stage('Archive JAR Artifact') {
             steps {
-                script {
-                    sh "'${MAVEN_HOME}/bin/mvn' compile"
-                }
+                archiveArtifacts artifacts: 'target/*.jar', allowEmptyArchive: false
             }
         }
 
-        stage('Test') {
-            steps {
-                script {
-                    // Run tests
-                    withEnv(["PATH+JDK=${JAVA_HOME}/bin"]) {
-                        sh "'${MAVEN_HOME}/bin/mvn' test"
-                    }
-                }
-            }
-        }
+        //  stage('Deploy Development Environment') {
+        //
+        //  }
+        //
+        //  stage('Deploy Testing Environment') {
+        //
+        //  }
 
-        stage('Package') {
+        stage('Deploy Production Infrastructure') {
             steps {
                 script {
-                    // Package the application
-                    sh "'${MAVEN_HOME}/bin/mvn' package"
-                }
-            }
-        }
-*/
-        stage('Build Docker Image') {
-            steps {
-                script {
-                    sh """
-                    docker build -t ${IMAGE_NAME}:${IMAGE_TAG} .
-                    """
-                }
-            }
-        }
-
-        stage('Deploy with Docker Compose') {
-            steps {
-                script {
-                    sh """
-
-                        if ! docker ps --filter "name=rabbitmq_in_lms_network" --format '{{.Names}}' | grep -q rabbitmq_in_lms_network; then
-                          docker compose -f docker-compose-rabbitmq.yml up -d
+                    sh '''
+                        if ! docker ps --format '{{.Names}}' | grep -q rabbitmq_in_lms_network; then
+                            docker compose -f docker-compose-rabbitmq+postgres.yml up -d
                         else
-                          echo "RabbitMQ container already running."
+                            echo "RabbitMQ container already running."
                         fi
 
-                        if ! docker ps --filter "name=postgres_in_lms_network" --format '{{.Names}}' | grep -q postgres_in_lms_network; then
-                          docker compose -f docker-compose-postgres.yml up -d
+                        if ! docker ps --format '{{.Names}}' | grep -q postgres_in_lms_network; then
+                            docker compose -f docker-compose-rabbitmq+postgres.yml up -d
                         else
-                          echo "Postgres container already running."
+                            echo "Postgres container already running."
                         fi
 
+                        for i in $(seq 1 10)
+                        do
+                            echo "Attempt $i to Health-Check Postgres Container"
+                            if docker inspect --format='{{json .State.Health.Status}}' postgres_in_lms_network | grep healthy; then
+                                docker exec -i postgres_in_lms_network /bin/sh -c 'psql -U postgres -tc "SELECT 1 FROM pg_database WHERE datname = '\''users'\''" | grep -q 1 && echo "Database '\''users'\'' already initialized" || psql -U postgres -c "CREATE DATABASE users;"'
+                                docker exec -i postgres_in_lms_network /bin/sh -c 'psql -U postgres -tc "SELECT 1 FROM pg_database WHERE datname = '\''books'\''" | grep -q 1 && echo "Database '\''books'\'' already initialized" || psql -U postgres -c "CREATE DATABASE books;"'
+                                exit 0
+                            fi
+                            sleep 10
+                        done
+                        echo "Postgres container failed to pass HealthChecks."
+                        exit 1
+                    '''
+                }
+            }
+        }
 
-                        docker compose -f docker-compose.yml up -d --force-recreate
-
-                    """
+        stage('Deploy') {
+            steps {
+                script {
+                    sh "docker compose up -d --force-recreate"
                 }
             }
         }
@@ -130,15 +107,4 @@ pipeline {
             echo 'Pipeline failed!'
         }
     }
-
-////if containers are to be removed
-//     post {
-//         always {
-//             echo 'Cleaning up...'
-//             sh """
-//                 docker compose -f docker-compose.yml down || true
-//             """
-//         }
-//     }
-
 }

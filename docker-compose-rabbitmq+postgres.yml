@@ -43,3 +43,4 @@ networks:
 
 volumes:
     postgres_volume:
+    uploaded_files_volume:

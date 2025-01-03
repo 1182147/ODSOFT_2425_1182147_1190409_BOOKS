@@ -12,12 +12,10 @@ services:
             SPRING_PROFILES_ACTIVE: bootstrap
         networks:
             - lms_network
-        volumes:
-            - "uploaded_files_volume:/tmp"
 
 networks:
     lms_network:
         external: true
 
 volumes:
-    uploaded_files_volume:
+    postgres_volume:
